@@ -13,7 +13,7 @@ from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8686262469:AAGsGv3WAcULdJSy2GH-whPAG2s0hKIGFM4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН_ЗДЕСЬ")
 ADMIN_ID = 429382259  # Замени на свой ID
 IRIS_USERNAME = os.getenv("IRIS_USERNAME", "im_pinger_bot")  # Твой username бота (без @)
 IRIS_BOT_ID = 93372553  # ID бота @iris
