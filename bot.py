@@ -1,26 +1,26 @@
 import asyncio
-import random
 import logging
 import time
 import os
-import re
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.enums import ChatType
+from aiogram.enums import ChatType, ChatMemberStatus
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# 🔑 Настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН_ЗДЕСЬ")
-ADMIN_ID = 429382259  # Замени на свой ID
-IRIS_USERNAME = os.getenv("IRIS_USERNAME", "im_pinger_bot")  # Твой username бота (без @)
-IRIS_BOT_ID = 93372553  # ID бота @iris
-
+GIFT_DAYS = 3  # Сколько дней действует подарок
 DB_PATH = "chat_users.db"
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+call_active = False
+call_lock = asyncio.Lock()
 
 # ================= DATABASE =================
 async def init_db():
@@ -31,8 +31,7 @@ async def init_db():
                 username TEXT,
                 first_name TEXT,
                 last_seen REAL,
-                immune_until REAL DEFAULT 0,
-                pending_payment INTEGER DEFAULT 0
+                immune_until REAL DEFAULT 0
             )
         """)
         await db.commit()
@@ -45,192 +44,180 @@ async def upsert_user(user_id: int, username: str, first_name: str):
         """, (user_id, username, first_name, time.time()))
         await db.commit()
 
-async def set_pending_payment(user_id: int, amount: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO active_users (user_id, pending_payment)
-            VALUES (?, ?)
-        """, (user_id, amount))
-        await db.commit()
-
-async def clear_pending_payment(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE active_users SET pending_payment = 0 WHERE user_id = ?", (user_id,))
-        await db.commit()
-
-async def grant_immunity(user_id: int, days: int = 30):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            UPDATE active_users 
-            SET immune_until = ?, pending_payment = 0
-            WHERE user_id = ?
-        """, (time.time() + (days * 86400), user_id))
-        await db.commit()
-
-async def get_user_status(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("""
-            SELECT immune_until, pending_payment 
-            FROM active_users 
-            WHERE user_id = ?
-        """, (user_id,)) as cur:
-            return await cur.fetchone()
-
-async def get_active_users_for_tag():
+async def get_active_users():
     now = time.time()
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
             SELECT user_id, username, first_name FROM active_users 
-            WHERE immune_until < ? OR immune_until IS NULL
+            WHERE immune_until < ?
         """, (now,)) as cur:
             return await cur.fetchall()
 
-# ================= FORMATTER =================
+async def get_all_user_ids():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM active_users") as cur:
+            return await cur.fetchall()
+
+# ================= HELPERS =================
+async def is_chat_admin(chat_id: int, user_id: int) -> bool:
+    """Проверяет, является ли пользователь админом или создателем чата"""
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in (ChatMemberStatus.CREATOR, ChatMemberStatus.ADMINISTRATOR)
+    except Exception:
+        return False
+
 def make_mention(user_id: int, username: str, first_name: str) -> str:
     display_name = first_name or username or "Участник"
     return f'<a href="tg://user?id={user_id}">{display_name}</a>'
 
-# ================= AUTO-DELETE =================
-async def schedule_deletion(chat_id: int, message_id: int, delay: float = 10.0):
+async def send_and_delete(chat_id: int, text: str, parse_mode="HTML", delay=10.0):
+    """Отправляет сообщение и планирует его удаление"""
     try:
-        await asyncio.sleep(delay)
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+        msg = await bot.send_message(chat_id, text, parse_mode=parse_mode)
+        asyncio.create_task(asyncio.sleep(delay))
+        asyncio.create_task(bot.delete_message(chat_id, msg.message_id))
+        return msg
+    except Exception as e:
+        logging.error(f"Ошибка отправки/удаления: {e}")
 
-# ================= HANDLERS =================
+# ================= 🎁 /подарок =================
+@dp.message(Command("подарок"))
+async def cmd_gift(message: Message):
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return await message.answer("Команда работает только в группах.")
+    
+    uid = message.from_user.id
+    until = time.time() + (GIFT_DAYS * 86400)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO active_users (user_id, username, first_name, immune_until)
+            VALUES (?, ?, ?, ?)
+        """, (uid, message.from_user.username, message.from_user.first_name, until))
+        await db.commit()
 
-# Обработка платежей от Iris
-@dp.message(F.from_user.id == IRIS_BOT_ID)
-async def handle_iris_payment(message: Message):
-    """Обрабатывает сообщения от Iris bot о переводах"""
-    if not message.text:
-        return
-    
-    text = message.text.lower()
-    
-    # Проверяем, есть ли в сообщении информация о переводе
-    # Iris обычно шлёт: "Получен перевод от @username: 10 ирисок"
-    # или "You received 10 🌸 from @username"
-    
-    iris_match = re.search(r'(\d+)\s*(ирисок|ириска|ириски|🌸|iris)', text)
-    from_match = re.search(r'от\s+@?(\w+)|from\s+@?(\w+)', text)
-    
-    if iris_match and from_match:
-        amount = int(iris_match.group(1))
-        from_username = from_match.group(1) or from_match.group(2)
+    # Отправляем в ЛС, чтобы открыть диалог и дать разрешение на рассылку
+    try:
+        await bot.send_message(uid, 
+            f"🎁 <b>Подарок активирован!</b>\n"
+            f"У тебя {GIFT_DAYS} дня защиты от тегов.\n"
+            f"⚠️ Защита автоматически спадёт, как только ты напишешь любое сообщение в чат.",
+            parse_mode="HTML")
+    except TelegramForbiddenError:
+        pass  # Пользователь заблокировал бота или закрыл ЛС
         
-        # Ищем пользователя по username
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("""
-                SELECT user_id, pending_payment 
-                FROM active_users 
-                WHERE username = ?
-            """, (from_username,)) as cur:
-                user = await cur.fetchone()
-        
-        if user and amount >= 10:
-            user_id, pending = user
-            # Проверяем, ожидался ли платёж
-            if pending >= 10 or True:  # Принимаем любые платежи от 10 ирисок
-                await grant_immunity(user_id, 30)
-                try:
-                    await bot.send_message(
-                        user_id,
-                        f"✅ Оплата получена! Защита активирована на 30 дней.\n"
-                        f"Списано: 10 ирисок 🌸"
-                    )
-                except:
-                    pass
-                logging.info(f"💰 Пользователь {user_id} (@{from_username}) купил защиту за {amount} ирисок")
-        
-        await clear_pending_payment(user_id if user else 0)
+    await message.answer("✅ Подарок получен! Проверь личные сообщения от бота.")
+    asyncio.create_task(asyncio.sleep(10))
+    asyncio.create_task(bot.delete_message(message.chat.id, message.message_id + 1)) # Удаляем ответ бота
 
-# Команда покупки защиты
-@dp.message(Command("neteagay"))
-async def cmd_buy_immunity(message: Message):
-    user_id = message.from_user.id
-    
-    # Проверяем текущий статус
-    status = await get_user_status(user_id)
-    if status:
-        immune_until, pending = status
-        if immune_until and immune_until > time.time():
-            days_left = int((immune_until - time.time()) / 86400)
-            return await message.answer(f"🛡️ У тебя уже есть защита! Осталось дней: {days_left}")
-    
-    # Показываем инструкцию по оплате
-    await set_pending_payment(user_id, 10)
-    
-    instruction = (
-        f"🌸 <b>Защита от тегов — 10 ирисок (30 дней)</b>\n\n"
-        f"📝 <b>Инструкция по оплате:</b>\n"
-        f"1. Перейди в @iris\n"
-        f"2. Отправь команду:\n"
-        f"<code>/pay @{IRIS_USERNAME} 10</code>\n\n"
-        f"Или:\n"
-        f"<code>10 ирисок @{IRIS_USERNAME}</code>\n\n"
-        f"⏳ После оплаты защита активируется автоматически!"
-    )
-    
-    await message.answer(instruction, parse_mode="HTML")
-
-# Проверка статуса
-@dp.message(Command("balance"))
-async def cmd_balance(message: Message):
-    status = await get_user_status(message.from_user.id)
-    if not status:
-        return await message.answer("Сначала напиши что-нибудь в чат.")
-    
-    immune_until, pending = status
-    if immune_until and immune_until > time.time():
-        days_left = int((immune_until - time.time()) / 86400)
-        await message.answer(f"🛡️ <b>Защита активна!</b>\nОсталось дней: {days_left}")
-    else:
-        await message.answer("⚔️ <b>Защита не активна</b>\nИспользуй /neteagay для покупки.")
-
-# Снять защиту
-@dp.message(Command("tag_on"))
-async def cmd_cancel_immunity(message: Message):
-    await clear_pending_payment(message.from_user.id)
+# ================= 🛡️ /нетегать =================
+@dp.message(Command("нетегать"))
+async def cmd_no_tag(message: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE active_users SET immune_until = 0 WHERE user_id = ?", (message.from_user.id,))
         await db.commit()
-    await message.answer("⚔️ Защита снята. Теперь тебя могут тегать.")
+    await message.answer("🛡️ Защита снята. Теперь тебя могут тегать.")
+    asyncio.create_task(asyncio.sleep(10))
+    asyncio.create_task(bot.delete_message(message.chat.id, message.message_id + 1))
 
-# Игровые команды
-@dp.message(F.text.lower().in_(["игрок", "/игрок", "/randomcall"]))
-async def cmd_randomcall(message: Message):
-    users = await get_active_users_for_tag()
+# ================= 📢 /призыв =================
+@dp.message(Command("призыв"))
+async def cmd_call(message: Message):
+    if not await is_chat_admin(message.chat.id, message.from_user.id):
+        return await message.answer("🚫 Команда только для администраторов чата.")
+
+    async with call_lock:
+        if call_active:
+            return await message.answer("⏳ Общий сбор уже запущен! Подожди окончания.")
+        call_active = True
+
+    args = message.text.split(maxsplit=1)
+    text = args[1] if len(args) > 1 else "давай в игру"
+    
+    users = await get_active_users()
     if not users:
-        return await message.answer("⏳ Нет доступных игроков (все купили защиту).")
+        call_active = False
+        return await message.answer("Нет активных игроков (все в защите или молчат).")
 
-    chosen = random.choice(users)
-    mention = make_mention(chosen[0], chosen[1], chosen[2])
-    sent = await message.answer(f"{mention}, Зайди в игру! 🎮", parse_mode="HTML")
-    asyncio.create_task(schedule_deletion(message.chat.id, sent.message_id))
+    asyncio.create_task(run_60s_rally(message.chat.id, text, users))
+    await message.answer(f"🔔 Запускаю общий сбор на 60 сек!\nТекст: «{text}»")
+    asyncio.create_task(asyncio.sleep(10))
+    asyncio.create_task(bot.delete_message(message.chat.id, message.message_id + 1))
 
-@dp.message(F.text.lower().in_(["все тут", "/все тут", "/tagall"]))
-async def cmd_tagall(message: Message):
-    users = await get_active_users_for_tag()
-    if not users:
-        return await message.answer("⏳ Нет доступных игроков.")
-
+async def run_60s_rally(chat_id: int, text: str, users: list):
+    global call_active
     chunk_size = 8
-    for i in range(0, len(users), chunk_size):
-        chunk = users[i:i + chunk_size]
-        mentions = [make_mention(u[0], u[1], u[2]) for u in chunk]
-        msg = "Срочный сбор! 📢\n\n" + "\n".join(mentions)
-        sent = await message.answer(msg, parse_mode="HTML")
-        asyncio.create_task(schedule_deletion(message.chat.id, sent.message_id))
-        await asyncio.sleep(1.5)
+    try:
+        for ping in range(1, 4):
+            for i in range(0, len(users), chunk_size):
+                chunk = users[i:i + chunk_size]
+                mentions = [make_mention(u[0], u[1], u[2]) for u in chunk]
+                msg = f"📢 {ping}/3 | {text}\n\n" + "\n".join(mentions)
+                
+                sent = await bot.send_message(chat_id, msg, parse_mode="HTML")
+                asyncio.create_task(asyncio.sleep(10))
+                asyncio.create_task(bot.delete_message(chat_id, sent.message_id))
+                await asyncio.sleep(0.5)
+            
+            if ping < 3:
+                await asyncio.sleep(20)
+                
+        await send_and_delete(chat_id, "✅ Сбор завершён!")
+    except Exception as e:
+        logging.error(f"Ошибка в /призыв: {e}")
+        await send_and_delete(chat_id, f"⚠️ Сбор прерван: {e}")
+    finally:
+        call_active = False
 
-# Авто-согласие
+# ================= 📩 /призывлс =================
+@dp.message(Command("призывлс"))
+async def cmd_call_dm(message: Message):
+    if not await is_chat_admin(message.chat.id, message.from_user.id):
+        return await message.answer("🚫 Команда только для администраторов чата.")
+
+    args = message.text.split(maxsplit=1)
+    text = args[1] if len(args) > 1 else "Давай в игру!"
+    
+    raw_users = await get_all_user_ids()
+    if not raw_users:
+        return await message.answer("Нет пользователей в базе.")
+    
+    user_ids = [u[0] for u in raw_users]
+    await message.answer(f"📤 Начинаю рассылку в ЛС {len(user_ids)} участникам...")
+    asyncio.create_task(asyncio.sleep(10))
+    asyncio.create_task(bot.delete_message(message.chat.id, message.message_id + 1))
+    
+    success = fail = 0
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text)
+            success += 1
+        except (TelegramForbiddenError, TelegramBadRequest):
+            fail += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.4)  # Защита от FloodWait
+        
+    await send_and_delete(message.chat.id, f"✅ Рассылка завершена!\n🟢 Доставлено: {success}\n🔴 Пропущено: {fail}")
+
+# ================= 👁️ Авто-согласие + Сброс премиума =================
 @dp.message()
 async def auto_consent(message: Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP): return
     if message.from_user is None or message.from_user.is_bot: return
-    await upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
+    uid = message.from_user.id
+    # Если у пользователя активна защита от подарка, сбрасываем её при первом сообщении
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT immune_until FROM active_users WHERE user_id = ?", (uid,)) as cur:
+            res = await cur.fetchone()
+        if res and res[0] > time.time():
+            await db.execute("UPDATE active_users SET immune_until = 0 WHERE user_id = ?", (uid,))
+            await db.commit()
+            logging.info(f"🎁 Премиум у {uid} сброшен из-за сообщения в чате.")
+
+    await upsert_user(uid, message.from_user.username, message.from_user.first_name)
 
 # ================= MAIN =================
 async def run_bot(): await dp.start_polling(bot)
@@ -244,7 +231,7 @@ async def run_web():
 
 async def main():
     await init_db()
-    logging.info("🚀 БОТ С IRIS ОПЛАТОЙ ЗАПУЩЕН")
+    logging.info("🚀 БОТ ОБНОВЛЁН. Админы: /призыв, /призывлс | Игроки: /подарок, /нетегать")
     await asyncio.gather(run_bot(), run_web())
 
 if __name__ == "__main__":
