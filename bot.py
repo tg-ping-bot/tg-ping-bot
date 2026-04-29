@@ -23,21 +23,21 @@ dp = Dispatcher()
 call_lock = asyncio.Lock()
 active_tasks = {}
 
-# 🤡 Смешные фразы при провале кражи
 FAIL_MESSAGES = [
     "Жертва оказалась ниндзя и растворилась в тумане 🌫️",
-    "Ты споткнулся о собственный шнурок и уронил кошелёк 👟💸",
+    "Ты споткнулся о собственный шнурок и уронил кошелёк 💸",
     "Страж чата посмотрел на тебя так, что ты забыл, зачем пришёл 👮‍♂️",
-    "Попытка засчитана, но добыча ушла через чёрный ход 🚪💨",
-    "Ты крался так тихо, что даже сам себя не услышал 🤫",
-    "Ворона отвлекла тебя блестящей монеткой 🐦‍⬛✨",
-    "Жертва включила режим 'Невидимка' на 2 часа ",
+    "Попытка засчитана, но добыча ушла через чёрный ход 🚪",
+    "Ты крался так тихо, что даже сам себя не услышал ",
+    "Ворона отвлекла тебя блестящей монеткой 🐦‍✨",
+    "Жертва включила режим 'Невидимка' на 2 часа 👻",
     "Ты попытался украсть воздух, но инфляция съела и его 📉"
 ]
 
 # ================= DATABASE =================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # Добавили колонку is_premium (1 = Премиум, 0 = Обычный)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS active_users (
                 user_id INTEGER PRIMARY KEY,
@@ -45,6 +45,7 @@ async def init_db():
                 first_name TEXT,
                 last_seen REAL,
                 immune_until REAL DEFAULT 0,
+                is_premium INTEGER DEFAULT 0,
                 rankoins INTEGER DEFAULT 0,
                 last_bonus REAL DEFAULT 0,
                 last_rob REAL DEFAULT 0
@@ -103,6 +104,12 @@ async def db_update_last_rob(uid):
         await db.execute("UPDATE active_users SET last_rob = ? WHERE user_id = ?", (time.time(), uid))
         await db.commit()
 
+async def get_user_premium_status(uid):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT is_premium FROM active_users WHERE user_id = ?", (uid,)) as cur:
+            res = await cur.fetchone()
+            return res[0] if res else 0
+
 # ================= HELPERS =================
 async def is_chat_admin(chat_id: int, user_id: int) -> bool:
     try:
@@ -116,7 +123,6 @@ def make_mention(user_id: int, username: str, first_name: str) -> str:
     return f'<a href="tg://user?id={user_id}">{display_name}</a>'
 
 async def schedule_delete(chat_id: int, message_id: int, delay: float = 10.0):
-    """Удаляет сообщение через указанное время"""
     async def _delete():
         try:
             await asyncio.sleep(delay)
@@ -131,7 +137,8 @@ async def cmd_bonus(message: Message):
     uid = message.from_user.id
     data = await get_balance(uid)
     if not data:
-        return await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
+        msg = await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
+        return schedule_delete(message.chat.id, msg.message_id)
     
     rankoins, last_bonus, _ = data
     now = time.time()
@@ -141,7 +148,7 @@ async def cmd_bonus(message: Message):
         wait_time = int((last_bonus + cooldown) - now)
         h, m = divmod(wait_time, 3600)
         m //= 60
-        msg = await message.answer(f" Бонус недоступен. Жди: {h}ч {m}мин.")
+        msg = await message.answer(f"⏳ Бонус недоступен. Жди: {h}ч {m}мин.")
         return schedule_delete(message.chat.id, msg.message_id)
     
     await add_rankoins(uid, 100)
@@ -154,7 +161,8 @@ async def cmd_long(message: Message):
     uid = message.from_user.id
     data = await get_balance(uid)
     if not data:
-        return await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
+        msg = await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
+        return schedule_delete(message.chat.id, msg.message_id)
     
     _, _, last_rob = data
     now = time.time()
@@ -168,9 +176,8 @@ async def cmd_long(message: Message):
     
     await db_update_last_rob(uid)
     
-    # 🎲 Шанс успеха 10%
     if random.random() > 0.10:
-        msg = await message.answer(f"🕵️‍♂️ {random.choice(FAIL_MESSAGES)}")
+        msg = await message.answer(f"️‍♂️ {random.choice(FAIL_MESSAGES)}")
         return schedule_delete(message.chat.id, msg.message_id)
     
     victim_id = await get_random_victim(uid)
@@ -212,19 +219,68 @@ async def cmd_top(message: Message):
         msg = await message.answer("🏆 Топ пуст. Играйте активнее!")
         return schedule_delete(message.chat.id, msg.message_id)
         
-    text = "🏆 <b>Топ богачей чата:</b>\n\n"
+    text = " <b>Топ богачей чата:</b>\n\n"
     for i, (uid, uname, fname, coins) in enumerate(users, 1):
         display = uname or fname or f"User{uid}"
-        text += f"{i}. {display} — {coins} \n"
+        text += f"{i}. {display} — {coins} 💰\n"
         
     msg = await message.answer(text, parse_mode="HTML")
     schedule_delete(message.chat.id, msg.message_id)
 
-# ================= 📢 АДМИН: /награда (ответом на сообщение) =================
+# ================= 🎁 /подарок (Выдает Премиум) =================
+@dp.message(Command("подарок"))
+async def cmd_gift(message: Message):
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return await message.answer("Только в группах.")
+    
+    uid = message.from_user.id
+    until = time.time() + (3 * 86400) # 3 дня защиты
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Выдаем Премиум (is_premium = 1) и защиту
+        await db.execute("""
+            INSERT OR REPLACE INTO active_users (user_id, username, first_name, immune_until, is_premium)
+            VALUES (?, ?, ?, ?, 1)
+        """, (uid, message.from_user.username, message.from_user.first_name, until))
+        await db.commit()
+
+    try:
+        await bot.send_message(uid, 
+            f"🎁 <b>Подарок активирован!</b>\n"
+            f"Ты получил статус ПРЕМИУМ на 3 дня.\n"
+            f"Используй /нетегать, чтобы скрыться от тегов.",
+            parse_mode="HTML")
+    except Exception:
+        pass
+        
+    msg = await message.answer("✅ Подарок получен! Проверь ЛС. Ты теперь Премиум.")
+    schedule_delete(message.chat.id, msg.message_id)
+
+# ================= 🛡️ /нетегать (Только для Премиум) =================
+@dp.message(Command("нетегать"))
+async def cmd_no_tag(message: Message):
+    uid = message.from_user.id
+    
+    # Проверяем, есть ли Премиум
+    is_premium = await get_user_premium_status(uid)
+    if is_premium != 1:
+        msg = await message.answer("❌ Эта команда доступна только для Премиум пользователей.\nИспользуй /подарок, чтобы получить статус.")
+        return schedule_delete(message.chat.id, msg.message_id)
+    
+    # Если Премиум есть — включаем защиту еще на 3 дня
+    until = time.time() + (3 * 86400)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE active_users SET immune_until = ? WHERE user_id = ?", (until, uid))
+        await db.commit()
+        
+    msg = await message.answer("🛡️ Защита активирована! Тебя не будут тегать, пока ты не напишешь в чат.")
+    schedule_delete(message.chat.id, msg.message_id)
+
+# =================  АДМИН: /награда =================
 @dp.message(Command("награда"))
 async def cmd_award_reply(message: Message):
     if not await is_chat_admin(message.chat.id, message.from_user.id):
-        msg = await message.answer(" Только для администраторов.")
+        msg = await message.answer("🚫 Только для администраторов.")
         return schedule_delete(message.chat.id, msg.message_id)
         
     if not message.reply_to_message:
@@ -240,11 +296,9 @@ async def cmd_award_reply(message: Message):
     targets = set()
     reply_text = message.reply_to_message.text or ""
     
-    # 1. Ищем ссылки tg://user?id=
     links = re.findall(r'tg://user\?id=(\d+)', reply_text)
     targets.update(int(x) for x in links)
     
-    # 2. Ищем @username через сущности
     if message.reply_to_message.entities:
         for ent in message.reply_to_message.entities:
             if ent.type == "mention":
@@ -294,7 +348,7 @@ async def cmd_task(message: Message):
     builder.button(text=f"Забрать {amount} 💰", callback_data=f"task_{task_id}")
     
     msg = await message.answer(
-        f" <b>Групповая задача!</b>\n\n{text}\n\nНаграда: {amount} Ранкоинов",
+        f"📢 <b>Групповая задача!</b>\n\n{text}\n\nНаграда: {amount} Ранкоинов",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -309,7 +363,7 @@ async def process_task(callback: CallbackQuery):
         if amount > 0:
             await add_rankoins(callback.from_user.id, amount)
             del active_tasks[task_id]
-            await callback.answer(f"Получено {amount} Ранкоинов! 💰")
+            await callback.answer(f"Получено {amount} Ранкоинов! ")
             await callback.message.edit_text(
                 f"{callback.message.text}\n\n✅ Забрал: {callback.from_user.first_name}",
                 reply_markup=None
@@ -319,14 +373,14 @@ async def process_task(callback: CallbackQuery):
     except Exception:
         await callback.answer("Ошибка.", show_alert=True)
 
-# ================= 📢 /призыв (10 сек удаление) =================
+# ================= 📢 /призыв =================
 @dp.message(Command("призыв"))
 async def cmd_call(message: Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP): return
     if not await is_chat_admin(message.chat.id, message.from_user.id): return
 
     if call_lock.locked():
-        msg = await message.answer(" Сбор уже запущен!")
+        msg = await message.answer("⏳ Сбор уже запущен!")
         return schedule_delete(message.chat.id, msg.message_id)
 
     args = message.text.split(maxsplit=1)
@@ -348,9 +402,9 @@ async def run_60s_rally(chat_id: int, text: str, users: list):
                 for i in range(0, len(users), chunk_size):
                     chunk = users[i:i + chunk_size]
                     mentions = [make_mention(u[0], u[1], u[2]) for u in chunk]
-                    msg = f"📢 {ping}/3 | {text}\n\n" + "\n".join(mentions)
+                    msg = f" {ping}/3 | {text}\n\n" + "\n".join(mentions)
                     sent = await bot.send_message(chat_id, msg, parse_mode="HTML")
-                    schedule_delete(chat_id, sent.message_id, delay=10.0) # РОВНО 10 СЕКУНД
+                    schedule_delete(chat_id, sent.message_id, delay=10.0)
                     await asyncio.sleep(0.5)
                 if ping < 3: await asyncio.sleep(20)
                 
@@ -361,7 +415,7 @@ async def run_60s_rally(chat_id: int, text: str, users: list):
             err = await bot.send_message(chat_id, f"⚠️ Сбор прерван: {e}")
             schedule_delete(chat_id, err.message_id, delay=10.0)
 
-# ================= ️ Авто-согласие =================
+# ================= 👁️ Авто-согласие + Сброс защиты =================
 @dp.message()
 async def auto_consent(message: Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP): return
@@ -371,9 +425,12 @@ async def auto_consent(message: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT immune_until FROM active_users WHERE user_id = ?", (uid,)) as cur:
             res = await cur.fetchone()
+        
+        # Если есть защита (immune_until > now), сбрасываем её при сообщении в чат
         if res and res[0] > time.time():
             await db.execute("UPDATE active_users SET immune_until = 0 WHERE user_id = ?", (uid,))
             await db.commit()
+            # Статус is_premium НЕ сбрасываем, чтобы игрок мог снова включить защиту
 
     await upsert_user(uid, message.from_user.username, message.from_user.first_name)
 
@@ -389,7 +446,7 @@ async def run_web():
 
 async def main():
     await init_db()
-    logging.info("🚀 БОТ ГОТОВ: /топ, /награда, смешные провалы, удаление 10с")
+    logging.info("🚀 БОТ ГОТОВ. Премиум и /нетегать исправлены.")
     await asyncio.gather(run_bot(), run_web())
 
 if __name__ == "__main__":
