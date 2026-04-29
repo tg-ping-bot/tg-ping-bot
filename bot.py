@@ -153,24 +153,25 @@ async def send_long_animation(chat_id: int, success: bool, caption: str):
     except Exception:
         await bot.send_message(chat_id, caption)
 
-# =================  РЕГИСТРАЦИЯ КОМАНД =================
+# ================= 📜 РЕГИСТРАЦИЯ КОМАНД (ЛАТИНИЦА!) =================
 async def register_commands(bot: Bot):
     commands = [
-        BotCommand(command="бонус", description="Получить 100 Ранкоинов (раз в 24ч)"),
+        BotCommand(command="bonus", description="Получить 100 Ранкоинов (раз в 24ч)"),
         BotCommand(command="long", description="Ограбить участника (ответом, 10% шанс)"),
-        BotCommand(command="баланс", description="Проверить свой баланс"),
-        BotCommand(command="топ", description="Топ-10 богачей чата"),
-        BotCommand(command="подарок", description="Получить Премиум на 3 дня"),
-        BotCommand(command="нетегать", description="Включить защиту (только Премиум)"),
-        BotCommand(command="призыв", description="Запустить общий сбор (только админ)"),
-        BotCommand(command="задача", description="Создать задание с наградой (админ)"),
-        BotCommand(command="награда", description="Выдать монеты за ответ (админ)")
+        BotCommand(command="balance", description="Проверить свой баланс"),
+        BotCommand(command="top", description="Топ-10 богачей чата"),
+        BotCommand(command="gift", description="Получить Премиум на 3 дня"),
+        BotCommand(command="notag", description="Включить защиту (только Премиум)"),
+        BotCommand(command="call", description="Запустить общий сбор (только админ)"),
+        BotCommand(command="quest", description="Создать задание с наградой (админ)"),
+        BotCommand(command="award", description="Выдать монеты за ответ (админ)")
     ]
     await bot.set_my_commands(commands)
-    logging.info("✅ Команды зарегистрированы в Telegram")
+    logging.info("✅ Команды зарегистрированы в Telegram (Latin)")
 
 # ================= 💰 ЭКОНОМИКА =================
-@dp.message(Command("бонус"))
+# Поддерживаем и латинские, и русские названия команд для удобства
+@dp.message(Command("bonus", "бонус"))
 async def cmd_bonus(message: Message):
     uid = message.from_user.id
     data = await get_balance(uid)
@@ -187,7 +188,7 @@ async def cmd_bonus(message: Message):
         wait_time = int((last_bonus + cooldown) - now)
         h, m = divmod(wait_time, 3600)
         m //= 60
-        msg = await message.answer(f" Бонус недоступен. Жди: {h}ч {m}мин.")
+        msg = await message.answer(f"⏳ Бонус недоступен. Жди: {h}ч {m}мин.")
         schedule_delete(message.chat.id, msg.message_id)
         return
     
@@ -237,7 +238,7 @@ async def cmd_long(message: Message):
     target_name = message.reply_to_message.from_user.first_name
     
     if random.random() > 0.10:
-        text = f"🕵️♂️ Провал! {random.choice(FAIL_MESSAGES)}"
+        text = f"🕵️‍♂️ Провал! {random.choice(FAIL_MESSAGES)}"
         await send_long_animation(message.chat.id, success=False, caption=text)
         msg = await message.answer(text) 
         schedule_delete(message.chat.id, msg.message_id)
@@ -258,7 +259,7 @@ async def cmd_long(message: Message):
     msg = await message.answer(text)
     schedule_delete(message.chat.id, msg.message_id)
 
-@dp.message(Command("баланс"))
+@dp.message(Command("balance", "баланс"))
 async def cmd_balance(message: Message):
     data = await get_balance(message.from_user.id)
     if not data:
@@ -269,14 +270,14 @@ async def cmd_balance(message: Message):
     msg = await message.answer(f"💳 Твой баланс: {rankoins} Ранкоинов.")
     schedule_delete(message.chat.id, msg.message_id)
 
-@dp.message(Command("топ"))
+@dp.message(Command("top", "топ"))
 async def cmd_top(message: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id, username, first_name, rankoins FROM active_users ORDER BY rankoins DESC LIMIT 10") as cur:
             users = await cur.fetchall()
     
     if not users:
-        msg = await message.answer(" Топ пуст. Играйте активнее!")
+        msg = await message.answer("🏆 Топ пуст. Играйте активнее!")
         schedule_delete(message.chat.id, msg.message_id)
         return
         
@@ -288,8 +289,8 @@ async def cmd_top(message: Message):
     msg = await message.answer(text, parse_mode="HTML")
     schedule_delete(message.chat.id, msg.message_id)
 
-# ================= 🎁 /подарок =================
-@dp.message(Command("подарок"))
+# ================= 🎁 /gift =================
+@dp.message(Command("gift", "подарок"))
 async def cmd_gift(message: Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return await message.answer("Только в группах.")
@@ -308,7 +309,7 @@ async def cmd_gift(message: Message):
         await bot.send_message(uid, 
             f"🎁 <b>Подарок активирован!</b>\n"
             f"Ты получил статус ПРЕМИУМ на 3 дня.\n"
-            f"Используй /нетегать, чтобы скрыться от тегов.",
+            f"Используй /notag, чтобы скрыться от тегов.",
             parse_mode="HTML")
     except Exception:
         pass
@@ -316,14 +317,14 @@ async def cmd_gift(message: Message):
     msg = await message.answer("✅ Подарок получен! Проверь ЛС. Ты теперь Премиум.")
     schedule_delete(message.chat.id, msg.message_id)
 
-# ================= 🛡️ /нетегать =================
-@dp.message(Command("нетегать"))
+# ================= 🛡️ /notag =================
+@dp.message(Command("notag", "нетегать"))
 async def cmd_no_tag(message: Message):
     uid = message.from_user.id
     is_premium = await get_user_premium_status(uid)
     
     if is_premium != 1:
-        msg = await message.answer("❌ Эта команда доступна только для Премиум пользователей.\nИспользуй /подарок, чтобы получить статус.")
+        msg = await message.answer("❌ Эта команда доступна только для Премиум пользователей.\nИспользуй /gift, чтобы получить статус.")
         schedule_delete(message.chat.id, msg.message_id)
         return
     
@@ -335,8 +336,8 @@ async def cmd_no_tag(message: Message):
     msg = await message.answer("🛡️ Защита активирована! Тебя не будут тегать, пока ты не напишешь в чат.")
     schedule_delete(message.chat.id, msg.message_id)
 
-# =================  АДМИН: /награда =================
-@dp.message(Command("награда"))
+# ================= 🎁 АДМИН: /award =================
+@dp.message(Command("award", "награда"))
 async def cmd_award_reply(message: Message):
     if not await is_chat_admin(message.chat.id, message.from_user.id):
         msg = await message.answer("🚫 Только для администраторов.")
@@ -386,7 +387,7 @@ async def cmd_award_reply(message: Message):
     schedule_delete(message.chat.id, msg.message_id)
 
 # ================= 📢 ЗАДАЧИ (АДМИН) =================
-@dp.message(Command("задача"))
+@dp.message(Command("quest", "задача"))
 async def cmd_task(message: Message):
     if not await is_chat_admin(message.chat.id, message.from_user.id):
         msg = await message.answer("🚫 Только для админов.")
@@ -395,7 +396,7 @@ async def cmd_task(message: Message):
     
     parts = message.text.split()
     if len(parts) < 3:
-        msg = await message.answer(" Формат: /задача [сумма] [текст задания]")
+        msg = await message.answer("❌ Формат: /quest [сумма] [текст задания]")
         schedule_delete(message.chat.id, msg.message_id)
         return
     
@@ -403,7 +404,7 @@ async def cmd_task(message: Message):
         amount = int(parts[1])
         text = " ".join(parts[2:])
     except ValueError:
-        msg = await message.answer(" Сумма должна быть числом.")
+        msg = await message.answer("❌ Сумма должна быть числом.")
         schedule_delete(message.chat.id, msg.message_id)
         return
     
@@ -438,8 +439,8 @@ async def process_task(callback: CallbackQuery):
     except Exception:
         await callback.answer("Ошибка.", show_alert=True)
 
-# ================= 📢 /призыв =================
-@dp.message(Command("призыв"))
+# ================= 📢 /call =================
+@dp.message(Command("call", "призыв"))
 async def cmd_call(message: Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP): return
     if not await is_chat_admin(message.chat.id, message.from_user.id): return
@@ -469,7 +470,7 @@ async def run_60s_rally(chat_id: int, text: str, users: list):
                 for i in range(0, len(users), chunk_size):
                     chunk = users[i:i + chunk_size]
                     mentions = [make_mention(u[0], u[1], u[2]) for u in chunk]
-                    msg = f" {ping}/3 | {text}\n\n" + "\n".join(mentions)
+                    msg = f"📢 {ping}/3 | {text}\n\n" + "\n".join(mentions)
                     sent = await bot.send_message(chat_id, msg, parse_mode="HTML")
                     schedule_delete(chat_id, sent.message_id, delay=10.0)
                     await asyncio.sleep(0.5)
@@ -479,7 +480,7 @@ async def run_60s_rally(chat_id: int, text: str, users: list):
             schedule_delete(chat_id, final.message_id, delay=10.0)
         except Exception as e:
             logging.error(f"Ошибка в /призыв: {e}")
-            err = await bot.send_message(chat_id, f"️ Сбор прерван: {e}")
+            err = await bot.send_message(chat_id, f"⚠️ Сбор прерван: {e}")
             schedule_delete(chat_id, err.message_id, delay=10.0)
 
 # ================= 👁️ Авто-согласие + Сброс защиты =================
@@ -513,14 +514,14 @@ async def run_web():
         await asyncio.sleep(3600)
 
 async def main():
-    # 🗑️ Автоматическая очистка старой БД при запуске (чтобы не лезть в консоль)
+    # 🗑️ Автоматическая очистка старой БД при запуске
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
         logging.info("🗑️ Старая база удалена для корректного обновления.")
         
     await init_db()
     await register_commands(bot)
-    logging.info("🚀 БОТ ГОТОВ. Все команды активны.")
+    logging.info("🚀 БОТ ГОТОВ. Команды на латинице активны.")
     await asyncio.gather(run_bot(), run_web())
 
 if __name__ == "__main__":
