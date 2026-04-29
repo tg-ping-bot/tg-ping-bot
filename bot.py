@@ -520,6 +520,12 @@ async def run_web():
         await asyncio.sleep(3600)
 
 async def main():
+    # 🗑️ Автоматическое удаление старой базы при каждом запуске
+    import os
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+        logging.info("🗑️ Старая база удалена для обновления структуры.")
+        
     await init_db()
     await register_commands(bot)
     logging.info("🚀 БОТ ГОТОВ. Все команды активны.")
