@@ -7,10 +7,9 @@ import re
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BotCommand
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ChatType, ChatMemberStatus
-from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -23,21 +22,30 @@ dp = Dispatcher()
 call_lock = asyncio.Lock()
 active_tasks = {}
 
+# 🎬 GIF для анимаций /long (прямые ссылки на .mp4)
+SUCCESS_GIFS = [
+    "https://media.giphy.com/media/l0HlHFRbmaX96hP6M/giphy.mp4",
+    "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.mp4"
+]
+FAIL_GIFS = [
+    "https://media.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.mp4",
+    "https://media.giphy.com/media/l2JhORT5IFnj6ioko/giphy.mp4"
+]
+
 FAIL_MESSAGES = [
-    "Жертва оказалась ниндзя и растворилась в тумане 🌫️",
-    "Ты споткнулся о собственный шнурок и уронил кошелёк 💸",
-    "Страж чата посмотрел на тебя так, что ты забыл, зачем пришёл 👮‍♂️",
-    "Попытка засчитана, но добыча ушла через чёрный ход 🚪",
-    "Ты крался так тихо, что даже сам себя не услышал ",
-    "Ворона отвлекла тебя блестящей монеткой 🐦‍✨",
-    "Жертва включила режим 'Невидимка' на 2 часа 👻",
-    "Ты попытался украсть воздух, но инфляция съела и его 📉"
+    "Жертва оказалась ниндзя ",
+    "Споткнулся о шнурок 👟",
+    "Страж чата спугнул тебя 👮‍♂️",
+    "Добыча ушла через чёрный ход 🚪",
+    "Крался тише мыши, но спалил себя 🐭",
+    "Ворона отобрала монету 🐦‍⬛",
+    "Жертва включила невидимость ",
+    "Инфляция съела награду 📉"
 ]
 
 # ================= DATABASE =================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # Добавили колонку is_premium (1 = Премиум, 0 = Обычный)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS active_users (
                 user_id INTEGER PRIMARY KEY,
@@ -88,12 +96,6 @@ async def remove_rankoins(user_id: int, amount: int) -> bool:
         await db.commit()
         return res.rowcount > 0
 
-async def get_random_victim(thief_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM active_users WHERE rankoins > 0 AND user_id != ? ORDER BY RANDOM() LIMIT 1", (thief_id,)) as cur:
-            res = await cur.fetchone()
-            return res[0] if res else None
-
 async def db_update_last_bonus(uid):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE active_users SET last_bonus = ? WHERE user_id = ?", (time.time(), uid))
@@ -109,6 +111,16 @@ async def get_user_premium_status(uid):
         async with db.execute("SELECT is_premium FROM active_users WHERE user_id = ?", (uid,)) as cur:
             res = await cur.fetchone()
             return res[0] if res else 0
+
+async def get_all_users_map():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id, username FROM active_users") as cur:
+            rows = await cur.fetchall()
+    user_map = {}
+    for uid, uname in rows:
+        if uname: user_map[uname.lower()] = uid
+        user_map[f"id_{uid}"] = uid
+    return user_map
 
 # ================= HELPERS =================
 async def is_chat_admin(chat_id: int, user_id: int) -> bool:
@@ -130,6 +142,31 @@ async def schedule_delete(chat_id: int, message_id: int, delay: float = 10.0):
         except Exception:
             pass
     asyncio.create_task(_delete())
+
+async def send_long_animation(chat_id: int, success: bool, caption: str):
+    """Отправляет GIF с подписью, fallback на текст если ссылка не грузится"""
+    gif_url = random.choice(SUCCESS_GIFS if success else FAIL_GIFS)
+    try:
+        await bot.send_animation(chat_id, gif_url, caption=caption)
+    except Exception as e:
+        logging.warning(f"GIF не загрузился, отправляю текст: {e}")
+        await bot.send_message(chat_id, caption)
+
+# ================= 📜 РЕГИСТРАЦИЯ КОМАНД =================
+async def register_commands(bot: Bot):
+    commands = [
+        BotCommand(command="бонус", description="Получить 100 Ранкоинов (раз в 24ч)"),
+        BotCommand(command="long", description="Ограбить участника (ответом, 10% шанс)"),
+        BotCommand(command="баланс", description="Проверить свой баланс"),
+        BotCommand(command="топ", description="Топ-10 богачей чата"),
+        BotCommand(command="подарок", description="Получить Премиум на 3 дня"),
+        BotCommand(command="нетегать", description="Включить защиту (только Премиум)"),
+        BotCommand(command="призыв", description="Запустить общий сбор (только админ)"),
+        BotCommand(command="задача", description="Создать задание с наградой (админ)"),
+        BotCommand(command="награда", description="Выдать монеты за ответ (админ)")
+    ]
+    await bot.set_my_commands(commands)
+    logging.info("✅ Команды зарегистрированы в Telegram")
 
 # ================= 💰 ЭКОНОМИКА =================
 @dp.message(Command("бонус"))
@@ -164,6 +201,20 @@ async def cmd_long(message: Message):
         msg = await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
         return schedule_delete(message.chat.id, msg.message_id)
     
+    if not message.reply_to_message:
+        msg = await message.answer("❌ Ответьте на сообщение того, кого хотите ограбить!")
+        return schedule_delete(message.chat.id, msg.message_id)
+    
+    target_id = message.reply_to_message.from_user.id
+    if target_id == uid:
+        msg = await message.answer("🤡 Нельзя ограбить самого себя!")
+        return schedule_delete(message.chat.id, msg.message_id)
+    
+    target_data = await get_balance(target_id)
+    if not target_data:
+        msg = await message.answer("❌ Этот участник не зарегистрирован в боте.")
+        return schedule_delete(message.chat.id, msg.message_id)
+    
     _, _, last_rob = data
     now = time.time()
     cooldown = 2 * 60 * 60
@@ -175,28 +226,29 @@ async def cmd_long(message: Message):
         return schedule_delete(message.chat.id, msg.message_id)
     
     await db_update_last_rob(uid)
+    target_name = message.reply_to_message.from_user.first_name
     
+    # 🎲 10% Шанс успеха
     if random.random() > 0.10:
-        msg = await message.answer(f"️‍♂️ {random.choice(FAIL_MESSAGES)}")
+        text = f"🕵️‍♂️ Провал! {random.choice(FAIL_MESSAGES)}"
+        await send_long_animation(message.chat.id, success=False, caption=text)
+        msg = await message.answer(text) # Дублируем текстом для автоудаления
         return schedule_delete(message.chat.id, msg.message_id)
     
-    victim_id = await get_random_victim(uid)
-    if not victim_id:
-        msg = await message.answer("🎭 Некого ограбить (у всех 0 монет).")
-        return schedule_delete(message.chat.id, msg.message_id)
-    
+    # 💸 Успех
     desired = random.randint(1, 100)
-    victim_data = await get_balance(victim_id)
-    victim_balance = victim_data[0] if victim_data else 0
+    victim_balance = target_data[0]
     actual = min(desired, victim_balance)
     
     if actual > 0:
-        await remove_rankoins(victim_id, actual)
+        await remove_rankoins(target_id, actual)
         await add_rankoins(uid, actual)
-        msg = await message.answer(f"💸 Успех! Украдено {actual} Ранкоинов. (Планировал: {desired})")
+        text = f"💸 Успех! Украл {actual} Ранкоинов у {target_name}. (Планировал: {desired})"
     else:
-        msg = await message.answer("🕵️‍♂️ Удача есть, но карманы жертвы пусты.")
+        text = f"🕵️‍♂️ Удача есть, но у {target_name} пустые карманы."
         
+    await send_long_animation(message.chat.id, success=True, caption=text)
+    msg = await message.answer(text)
     schedule_delete(message.chat.id, msg.message_id)
 
 @dp.message(Command("баланс"))
@@ -219,7 +271,7 @@ async def cmd_top(message: Message):
         msg = await message.answer("🏆 Топ пуст. Играйте активнее!")
         return schedule_delete(message.chat.id, msg.message_id)
         
-    text = " <b>Топ богачей чата:</b>\n\n"
+    text = "🏆 <b>Топ богачей чата:</b>\n\n"
     for i, (uid, uname, fname, coins) in enumerate(users, 1):
         display = uname or fname or f"User{uid}"
         text += f"{i}. {display} — {coins} 💰\n"
@@ -227,17 +279,16 @@ async def cmd_top(message: Message):
     msg = await message.answer(text, parse_mode="HTML")
     schedule_delete(message.chat.id, msg.message_id)
 
-# ================= 🎁 /подарок (Выдает Премиум) =================
+# =================  /подарок (Выдает Премиум) =================
 @dp.message(Command("подарок"))
 async def cmd_gift(message: Message):
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return await message.answer("Только в группах.")
     
     uid = message.from_user.id
-    until = time.time() + (3 * 86400) # 3 дня защиты
+    until = time.time() + (3 * 86400)
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # Выдаем Премиум (is_premium = 1) и защиту
         await db.execute("""
             INSERT OR REPLACE INTO active_users (user_id, username, first_name, immune_until, is_premium)
             VALUES (?, ?, ?, ?, 1)
@@ -260,14 +311,12 @@ async def cmd_gift(message: Message):
 @dp.message(Command("нетегать"))
 async def cmd_no_tag(message: Message):
     uid = message.from_user.id
-    
-    # Проверяем, есть ли Премиум
     is_premium = await get_user_premium_status(uid)
+    
     if is_premium != 1:
-        msg = await message.answer("❌ Эта команда доступна только для Премиум пользователей.\nИспользуй /подарок, чтобы получить статус.")
+        msg = await message.answer(" Эта команда доступна только для Премиум пользователей.\nИспользуй /подарок, чтобы получить статус.")
         return schedule_delete(message.chat.id, msg.message_id)
     
-    # Если Премиум есть — включаем защиту еще на 3 дня
     until = time.time() + (3 * 86400)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE active_users SET immune_until = ? WHERE user_id = ?", (until, uid))
@@ -276,7 +325,7 @@ async def cmd_no_tag(message: Message):
     msg = await message.answer("🛡️ Защита активирована! Тебя не будут тегать, пока ты не напишешь в чат.")
     schedule_delete(message.chat.id, msg.message_id)
 
-# =================  АДМИН: /награда =================
+# ================= 🎁 АДМИН: /награда =================
 @dp.message(Command("награда"))
 async def cmd_award_reply(message: Message):
     if not await is_chat_admin(message.chat.id, message.from_user.id):
@@ -284,7 +333,7 @@ async def cmd_award_reply(message: Message):
         return schedule_delete(message.chat.id, msg.message_id)
         
     if not message.reply_to_message:
-        msg = await message.answer("❌ Ответьте на сообщение с упоминаниями.")
+        msg = await message.answer(" Ответьте на сообщение, где упомянуты участники.")
         return schedule_delete(message.chat.id, msg.message_id)
         
     parts = message.text.split()
@@ -293,33 +342,34 @@ async def cmd_award_reply(message: Message):
         try: amount = int(parts[1])
         except: pass
         
+    reply_msg = message.reply_to_message
+    reply_text = reply_msg.text or reply_msg.caption or ""
     targets = set()
-    reply_text = message.reply_to_message.text or ""
     
-    links = re.findall(r'tg://user\?id=(\d+)', reply_text)
-    targets.update(int(x) for x in links)
-    
-    if message.reply_to_message.entities:
-        for ent in message.reply_to_message.entities:
+    if reply_msg.entities:
+        for ent in reply_msg.entities:
             if ent.type == "mention":
-                username = reply_text[ent.offset:ent.offset+ent.length].replace("@", "")
-                async with aiosqlite.connect(DB_PATH) as db:
-                    async with db.execute("SELECT user_id FROM active_users WHERE username = ?", (username,)) as cur:
-                        res = await cur.fetchone()
-                        if res: targets.add(res[0])
+                uname = reply_text[ent.offset:ent.offset+ent.length].lstrip("@").lower()
+                targets.add(uname)
             elif ent.type == "text_link" and ent.url.startswith("tg://user?id="):
-                targets.add(int(ent.url.split("=")[1]))
+                try: targets.add(f"id_{int(ent.url.split('=')[1])}")
+                except: pass
                 
-    if not targets:
-        msg = await message.answer("❌ Не найдено зарегистрированных пользователей в сообщении.")
+    for match in re.finditer(r'@([a-zA-Z0-9_]{5,32})', reply_text):
+        targets.add(match.group(1).lower())
+        
+    user_map = await get_all_users_map()
+    awarded_ids = set()
+    for t in targets:
+        if t in user_map: awarded_ids.add(user_map[t])
+            
+    if not awarded_ids:
+        msg = await message.answer(" Не найдено зарегистрированных пользователей в сообщении.")
         return schedule_delete(message.chat.id, msg.message_id)
         
-    awarded_count = 0
-    for uid in targets:
-        await add_rankoins(uid, amount)
-        awarded_count += 1
+    for uid in awarded_ids: await add_rankoins(uid, amount)
         
-    msg = await message.answer(f"✅ Выдано {amount} Ранкоинов {awarded_count} участникам!")
+    msg = await message.answer(f"✅ Выдано {amount} Ранкоинов {len(awarded_ids)} участникам!")
     schedule_delete(message.chat.id, msg.message_id)
 
 # ================= 📢 ЗАДАЧИ (АДМИН) =================
@@ -359,11 +409,10 @@ async def process_task(callback: CallbackQuery):
     try:
         _, task_id = callback.data.split("_")
         amount = active_tasks.get(task_id, 0)
-        
         if amount > 0:
             await add_rankoins(callback.from_user.id, amount)
             del active_tasks[task_id]
-            await callback.answer(f"Получено {amount} Ранкоинов! ")
+            await callback.answer(f"Получено {amount} Ранкоинов! 💰")
             await callback.message.edit_text(
                 f"{callback.message.text}\n\n✅ Забрал: {callback.from_user.first_name}",
                 reply_markup=None
@@ -391,7 +440,7 @@ async def cmd_call(message: Message):
         return schedule_delete(message.chat.id, msg.message_id)
 
     asyncio.create_task(run_60s_rally(message.chat.id, text, users))
-    msg = await message.answer(f"🔔 Призыв запущен!\nТекст: «{text}»")
+    msg = await message.answer(f" Призыв запущен!\nТекст: «{text}»")
     schedule_delete(message.chat.id, msg.message_id)
 
 async def run_60s_rally(chat_id: int, text: str, users: list):
@@ -402,7 +451,7 @@ async def run_60s_rally(chat_id: int, text: str, users: list):
                 for i in range(0, len(users), chunk_size):
                     chunk = users[i:i + chunk_size]
                     mentions = [make_mention(u[0], u[1], u[2]) for u in chunk]
-                    msg = f" {ping}/3 | {text}\n\n" + "\n".join(mentions)
+                    msg = f"📢 {ping}/3 | {text}\n\n" + "\n".join(mentions)
                     sent = await bot.send_message(chat_id, msg, parse_mode="HTML")
                     schedule_delete(chat_id, sent.message_id, delay=10.0)
                     await asyncio.sleep(0.5)
@@ -425,12 +474,9 @@ async def auto_consent(message: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT immune_until FROM active_users WHERE user_id = ?", (uid,)) as cur:
             res = await cur.fetchone()
-        
-        # Если есть защита (immune_until > now), сбрасываем её при сообщении в чат
         if res and res[0] > time.time():
             await db.execute("UPDATE active_users SET immune_until = 0 WHERE user_id = ?", (uid,))
             await db.commit()
-            # Статус is_premium НЕ сбрасываем, чтобы игрок мог снова включить защиту
 
     await upsert_user(uid, message.from_user.username, message.from_user.first_name)
 
@@ -446,7 +492,8 @@ async def run_web():
 
 async def main():
     await init_db()
-    logging.info("🚀 БОТ ГОТОВ. Премиум и /нетегать исправлены.")
+    await register_commands(bot)  # ✅ Регистрация команд при запуске
+    logging.info(" БОТ ГОТОВ. Анимации + команды через / активны.")
     await asyncio.gather(run_bot(), run_web())
 
 if __name__ == "__main__":
