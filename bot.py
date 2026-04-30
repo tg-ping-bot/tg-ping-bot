@@ -153,7 +153,7 @@ async def send_long_animation(chat_id: int, success: bool, caption: str):
     except Exception:
         await bot.send_message(chat_id, caption)
 
-# ================= 📜 РЕГИСТРАЦИЯ КОМАНД (ЛАТИНИЦА!) =================
+# ================= 📜 РЕГИСТРАЦИЯ КОМАНД =================
 async def register_commands(bot: Bot):
     commands = [
         BotCommand(command="bonus", description="Получить 100 Ранкоинов (раз в 24ч)"),
@@ -170,12 +170,11 @@ async def register_commands(bot: Bot):
     logging.info("✅ Команды зарегистрированы в Telegram (Latin)")
 
 # ================= 💰 ЭКОНОМИКА =================
-# Поддерживаем и латинские, и русские названия команд для удобства
 @dp.message(Command("bonus", "бонус"))
 async def cmd_bonus(message: Message):
     uid = message.from_user.id
     data = await get_balance(uid)
-    if not data:
+    if not 
         msg = await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
         schedule_delete(message.chat.id, msg.message_id)
         return
@@ -201,7 +200,7 @@ async def cmd_bonus(message: Message):
 async def cmd_long(message: Message):
     uid = message.from_user.id
     data = await get_balance(uid)
-    if not data:
+    if not 
         msg = await message.answer("Сначала напиши что-нибудь в чат для регистрации.")
         schedule_delete(message.chat.id, msg.message_id)
         return
@@ -218,7 +217,7 @@ async def cmd_long(message: Message):
         return
     
     target_data = await get_balance(target_id)
-    if not target_data:
+    if not target_
         msg = await message.answer("❌ Этот участник не зарегистрирован в боте.")
         schedule_delete(message.chat.id, msg.message_id)
         return
@@ -262,7 +261,7 @@ async def cmd_long(message: Message):
 @dp.message(Command("balance", "баланс"))
 async def cmd_balance(message: Message):
     data = await get_balance(message.from_user.id)
-    if not data:
+    if not 
         msg = await message.answer("Тебя нет в базе. Напиши что-нибудь в чат.")
         schedule_delete(message.chat.id, msg.message_id)
         return
@@ -499,19 +498,31 @@ async def auto_consent(message: Message):
 
     await upsert_user(uid, message.from_user.username, message.from_user.first_name)
 
-# ================= MAIN =================
-async def run_bot(): 
-    await dp.start_polling(bot)
+# ================= 🌐 WEB SERVER (АНТИ-СОН) =================
+async def handle_health(request):
+    """Отвечает на пинги от UptimeRobot"""
+    return web.Response(text="OK", status=200)
 
 async def run_web():
     app = web.Application()
+    # Добавляем маршруты для пинга
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    while True: 
+    logging.info(f"🌐 Web-сервер запущен на порту {port} (Health: / и /health)")
+    
+    # Бесконечный цикл, чтобы сервер не завершался
+    while True:
         await asyncio.sleep(3600)
+
+# ================= MAIN =================
+async def run_bot(): 
+    await dp.start_polling(bot)
 
 async def main():
     # 🗑️ Автоматическая очистка старой БД при запуске
@@ -521,7 +532,8 @@ async def main():
         
     await init_db()
     await register_commands(bot)
-    logging.info("🚀 БОТ ГОТОВ. Команды на латинице активны.")
+    logging.info("🚀 БОТ ГОТОВ. Анти-сон активен.")
+    # Запускаем бота и веб-сервер параллельно
     await asyncio.gather(run_bot(), run_web())
 
 if __name__ == "__main__":
